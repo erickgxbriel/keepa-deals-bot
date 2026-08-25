@@ -1,15 +1,12 @@
 import time
 import logging
-import signal
 import sys
 from config import CHECK_INTERVAL_SECONDS
 from database import Database
 from hardware_parser import HardwareParser
 from telegram_notifier import TelegramNotifier
-from keepa_scraper import KeepaScraper
 from amazon_scraper import AmazonDealScraper
 
-# Configuração de Logs
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -24,7 +21,6 @@ class DealMonitor:
     def __init__(self):
         self.db = Database()
         self.notifier = TelegramNotifier()
-        self.keepa = KeepaScraper()
         self.amazon_direct = AmazonDealScraper()
         self.running = True
 
@@ -38,17 +34,13 @@ class DealMonitor:
         if not asin or not title or price <= 0:
             return
 
-        # 1. Avalia hardware e custo-benefício
         eval_result = HardwareParser.evaluate_deal(title, price, drop_percent)
-        
         if not eval_result["is_deal"]:
             return
 
-        # 2. Verifica se já notificamos esse produto por preço igual/menor
         if self.db.is_already_notified(asin, price):
             return
 
-        # 3. Dispara alerta urgente no Telegram
         logger.info(f"🔥 OFERTA ENCONTRADA: {title[:50]}... | R$ {price:.2f} (Tier: {eval_result['tier']})")
         
         sent = self.notifier.send_deal_alert(
@@ -57,57 +49,39 @@ class DealMonitor:
             current_price=price,
             drop_percent=drop_percent,
             tier=eval_result["tier"],
-            cpu=eval_result["cpu"],
-            ram=eval_result["ram"],
-            storage=eval_result["storage"],
+            cpu=eval_result.get("cpu", "N/A"),
+            ram=eval_result.get("ram", "N/A"),
+            storage=eval_result.get("storage", "N/A"),
             image_url=image_url
         )
 
-        # 4. Registra no banco de dados local
         if sent:
-            self.db.save_deal(
-                asin=asin,
-                title=title,
-                price=price,
-                drop_percent=drop_percent,
-                tier=eval_result["tier"]
-            )
+            self.db.save_deal(asin, title, price, drop_percent, eval_result["tier"])
             logger.info(f"✅ Alerta enviado para o Telegram com sucesso! (ASIN: {asin})")
 
     def run(self):
         logger.info("==================================================")
-        logger.info("🚀 INICIANDO MONITORADOR DE PROMOÇÕES DE MINI PC")
+        logger.info("🚀 MONITORADOR AMAZON BR (ALTA VELOCIDADE 24/7)")
         logger.info(f"⏱️ Intervalo de Checagem: {CHECK_INTERVAL_SECONDS} segundos")
         logger.info("==================================================")
 
-        # Testa conexão do bot no Telegram
         if self.notifier.send_test_message():
             logger.info("📱 Notificação de teste enviada ao Telegram com sucesso!")
         else:
-            logger.warning("⚠️ Não foi possível enviar teste ao Telegram. Verifique seu arquivo .env!")
-
-        # Inicializa o navegador Playwright
-        try:
-            self.keepa.start(headless=True)
-        except Exception as e:
-            logger.error(f"Erro ao inicializar Playwright: {e}")
+            logger.warning("⚠️ Não foi possível enviar teste ao Telegram. Verifique o arquivo .env!")
 
         cycle = 1
         while self.running:
             try:
-                logger.info(f"\n--- [Ciclo #{cycle}] Buscando novas ofertas... ---")
+                logger.info(f"\n--- [Ciclo #{cycle}] Varrendo ofertas na Amazon Brasil... ---")
                 
-                # 1. Busca ofertas no Keepa Deals
-                keepa_deals = self.keepa.fetch_deals()
-                logger.info(f"Keepa retornou {len(keepa_deals)} itens.")
-                for deal in keepa_deals:
+                deals = self.amazon_direct.search_deals()
+                logger.info(f"Amazon retornou {len(deals)} produtos para análise.")
+                
+                processed_count = 0
+                for deal in deals:
                     self.process_deal(deal)
-
-                # 2. Busca ofertas diretas na Amazon
-                amazon_deals = self.amazon_direct.search_mini_pcs()
-                logger.info(f"Amazon direta retornou {len(amazon_deals)} itens.")
-                for deal in amazon_deals:
-                    self.process_deal(deal)
+                    processed_count += 1
 
                 cycle += 1
                 time.sleep(CHECK_INTERVAL_SECONDS)
@@ -119,7 +93,6 @@ class DealMonitor:
                 logger.error(f"Erro durante o ciclo de monitoramento: {e}", exc_info=True)
                 time.sleep(15)
 
-        self.keepa.stop()
         logger.info("Monitorador encerrado.")
 
 if __name__ == "__main__":
