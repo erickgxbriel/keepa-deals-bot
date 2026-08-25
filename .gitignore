@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.env
+deals.db
+bot.log
+browser_session/
+.DS_Store
